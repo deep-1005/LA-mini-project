@@ -1,0 +1,1634 @@
+
+# 1. Imports
+# 2. Helper functions  (small reusable utilities)
+# 3. Step functions    (one function per pipeline step)
+#    Step 1  – Matrix Representation  (rotate / scale / flip)
+#    Step 2  – Matrix Simplification  (RREF + LU decomposition)
+#    Step 3  – Rank and Nullity       (SVD-based)
+#    Step 4  – Basis Selection        (QR with pivoting)
+#    Step 5  – Gram-Schmidt           (orthogonalisation)
+#    Step 6  – Projection             (onto a subspace)
+#    Step 7  – Least Squares          (polynomial fit)
+#    Step 8  – Eigenanalysis          (covariance / PCA)
+#    Step 9  – SVD Compression        (rank-k approximation)
+#    Step 10 – Enhancement            (SVD-based filters)
+# 4. GUI class  (App)
+#    – build_ui         : lays out every widget on screen
+#    – parameter panels : one builder per step
+#    – switch_step      : swaps parameter panel when you click a step
+#    – load/apply/save  : the three main action buttons
+# ============================================================
+
+
+# ── IMPORTS ──────────────────────────────────────────────────
+# tkinter  : Python's built-in GUI toolkit (buttons, windows, sliders…)
+# numpy    : fast numerical arrays — the whole image is a numpy array
+# scipy    : scientific helpers — we use affine_transform and lu()
+# PIL      : Pillow — opens/saves image files and converts them for display
+# os       : just for os.path.basename (show filename without full path)
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import numpy as np
+from scipy.ndimage import affine_transform
+from PIL import Image, ImageTk
+import os
+
+
+# ── COLOUR CONSTANTS used throughout the GUI ─────────────────
+# Defined once at the top so you only need to change them here
+# if you want a different colour scheme.
+BG       = '#0d0d18'   # deep navy  — main window background
+PANEL    = '#14142a'   # slightly lighter navy — sidebar background
+ACCENT   = '#8b5cf6'   # purple  — highlighted buttons / borders
+CYAN     = '#06b6d4'   # cyan    — section heading labels
+BTN_OFF  = '#1e1e3f'   # dark blue — un-selected step buttons
+DIMTXT   = '#94a3b8'   # grey-blue — secondary text
+PINK     = '#f472b6'   # pink    — info-box text
+GREEN    = '#10b981'   # green   — Apply button
+
+# Width of the left sidebar in pixels.
+# 320 px is wide enough so no label text gets clipped.
+SIDEBAR_W = 320
+
+
+# ─────────────────────────────────────────────────────────────
+#  SECTION 1 — HELPER FUNCTIONS
+#
+#  These are tiny, reusable utilities that the step functions
+#  call.  None of them talk to the GUI; they just do maths.
+# ─────────────────────────────────────────────────────────────
+
+def to_gray(img):
+    """
+    Convert an RGB image (H x W x 3 array) to a greyscale image (H x W).
+
+    Why these weights?
+    Human eyes are most sensitive to green, less to red, barely to blue.
+    The standard luminance formula weights each channel accordingly:
+        Y = 0.299*R + 0.587*G + 0.114*B
+    This gives a perceptually accurate brightness value for every pixel.
+
+    If the image is already 2-D (greyscale), just return it as float.
+    We work in float (not int) so we don't lose precision during maths.
+    """
+    if img.ndim == 3:                         # colour image has 3 channels
+        return (0.299 * img[:, :, 0] +        # red channel
+                0.587 * img[:, :, 1] +        # green channel
+                0.114 * img[:, :, 2]          # blue channel
+               ).astype(float)
+    return img.astype(float)                  # already greyscale
+
+
+def gray_to_rgb(arr):
+    """
+    Turn a 2-D greyscale array back into a displayable 3-channel image.
+
+    Displays need R, G, B values.  For a greyscale image all three
+    channels are identical, so we just stack the same 2-D array three times.
+
+    np.clip makes sure no pixel value goes outside [0, 255] (valid byte range).
+    np.stack(..., axis=2) creates a (H, W, 3) array.
+    """
+    g = np.clip(arr, 0, 255).astype(np.uint8)
+    return np.stack([g, g, g], axis=2)
+
+
+def apply_transform(img, M):
+    """
+    Apply a 2x2 linear transformation matrix M to every pixel position
+    in the image, rotating/scaling around the image centre.
+
+    Why do we need an offset?
+    scipy's affine_transform maps output pixel positions BACK to input
+    positions using the formula:
+        input_pos = M @ output_pos + offset
+    If offset = 0, the transformation happens around the top-left corner
+    (pixel 0,0), which looks wrong.  We compute the offset so that the
+    centre pixel stays in the centre:
+        offset = center - M @ center
+
+    For colour images we transform each R, G, B channel separately,
+    then stack them back together.  cval=128 fills any empty border
+    pixels with mid-grey.
+    """
+    center = np.array(img.shape[:2]) / 2.0    # (row_centre, col_centre)
+    offset = center - M @ center              # correction so centre stays put
+
+    if img.ndim == 3:
+        # Process each colour channel independently
+        channels = [
+            affine_transform(img[:, :, c], M, offset=offset, cval=128)
+            for c in range(3)                 # c = 0 (R), 1 (G), 2 (B)
+        ]
+        return np.stack(channels, axis=2).astype(np.uint8)
+
+    # Greyscale — one channel only
+    return affine_transform(img, M, offset=offset, cval=128).astype(np.uint8)
+
+
+def recolor(original, gray_new, gray_old):
+    """
+    Re-apply the original colours after a greyscale mathematical operation.
+
+    The linear-algebra steps (SVD, eigenanalysis, etc.) work on greyscale
+    because colour would require 3 separate SVDs.  After computing the new
+    greyscale brightness we want the colours back.
+
+    Method: for every pixel compute the ratio  new_brightness / old_brightness
+    and multiply EACH colour channel by that ratio.
+    This scales the colour up or down proportionally, preserving the hue.
+
+    np.clip(..., 1, None) prevents division-by-zero for very dark pixels.
+    [:, :, np.newaxis] broadcasts the 2-D ratio onto all 3 colour channels.
+    """
+    if original.ndim == 3:
+        ratio = gray_new / np.clip(gray_old, 1, None)
+        return np.clip(original * ratio[:, :, np.newaxis], 0, 255).astype(np.uint8)
+    return gray_to_rgb(gray_new)              # no colour to restore -> just greyscale
+
+
+# ─────────────────────────────────────────────────────────────
+#  SECTION 2 — STEP FUNCTIONS
+#
+#  Each function takes the image (numpy array) plus parameters
+#  from the sliders, does the maths, and returns:
+#      (result_image, info_string)
+#  The info string is shown in the pink text box on the left.
+# ─────────────────────────────────────────────────────────────
+
+# ── STEP 1A — ROTATION ───────────────────────────────────────
+
+def step1_rotate(img, angle):
+    """
+    Rotate the image by `angle` degrees using a 2x2 rotation matrix.
+
+    Linear Algebra concept: Rotation Matrix
+    ----------------------------------------
+    A rotation by angle theta maps a point (x, y) to (x', y') via:
+        [ x' ]   [ cos(t)   -sin(t) ] [ x ]
+        [ y' ] = [ sin(t)    cos(t) ] [ y ]
+
+    This is a LINEAR transformation — it:
+      - passes through the origin (centre of image)
+      - preserves distances (det = 1, so no stretching)
+      - preserves angles between vectors
+
+    det(R) = cos^2(t) + sin^2(t) = 1 always -> area is always preserved.
+    """
+    t = np.radians(angle)          # convert degrees -> radians (numpy trig uses radians)
+    c, s = np.cos(t), np.sin(t)   # cosine and sine of the angle
+
+    # Build the 2x2 rotation matrix
+    R = np.array([[c, -s],
+                  [s,  c]])
+
+    # Human-readable summary shown in the info panel
+    info = (f"STEP 1 - Matrix Representation\n"
+            f"Linear Transformation: Rotation\n\n"
+            f"Image stored as matrix A (H x W x 3)\n"
+            f"Each pixel position p mapped to: R * p\n\n"
+            f"Rotation matrix R =\n"
+            f"  [ {c:.3f}  {-s:.3f} ]\n"
+            f"  [ {s:.3f}   {c:.3f} ]\n\n"
+            f"det(R) = cos^2 + sin^2 = 1.0\n"
+            f"det = 1 => area is preserved\n\n"
+            f"Concept : Linear Transformation\n"
+            f"Purpose : Show rotation is just matrix multiply\n"
+            f"Outcome : Image rotated by {angle:.0f} degrees")
+
+    return apply_transform(img, R), info
+
+
+# ── STEP 1B — SCALING ────────────────────────────────────────
+
+def step1_scale(img, sx, sy):
+    """
+    Scale the image horizontally by sx and vertically by sy.
+
+    Linear Algebra concept: Diagonal (Scaling) Matrix
+    ---------------------------------------------------
+    A scaling matrix is diagonal:
+        S = [ sx   0  ]
+            [  0  sy  ]
+
+    - Eigenvalues of S are sx and sy (the diagonal entries).
+    - det(S) = sx * sy -> tells us how area changes.
+      - det < 1 -> image shrinks
+      - det > 1 -> image grows
+    - Eigenvectors are the x and y axes (identity directions).
+
+    sx=1.0 and sy=1.0 -> no change (identity transform).
+    sx=2.0 -> image appears twice as wide.
+    """
+    S = np.array([[sx, 0.0],
+                  [0.0, sy]])
+
+    info = (f"STEP 1 - Matrix Representation\n"
+            f"Linear Transformation: Scaling\n\n"
+            f"Scaling matrix S =\n"
+            f"  [ {sx:.2f}   0   ]\n"
+            f"  [  0    {sy:.2f} ]\n\n"
+            f"det(S) = {sx:.2f} x {sy:.2f} = {sx*sy:.3f}\n"
+            f"det < 1 => image shrinks\n"
+            f"det > 1 => image grows\n\n"
+            f"Eigenvalues: lambda1={sx:.2f}, lambda2={sy:.2f}\n"
+            f"(diagonal matrix => eigenvalues = diagonal)\n\n"
+            f"Concept : Linear Transformation\n"
+            f"Purpose : Scale pixel positions via diagonal matrix\n"
+            f"Outcome : Image scaled {sx:.2f}x wide, {sy:.2f}x tall")
+
+    return apply_transform(img, S), info
+
+
+# ── STEP 1C — FLIP ───────────────────────────────────────────
+
+def step1_flip(img, direction):
+    """
+    Flip (mirror) the image along one or both axes.
+
+    Linear Algebra concept: Reflection Matrix
+    ------------------------------------------
+    Horizontal flip   F = [[-1, 0], [0, 1]]   -> mirrors x-axis
+    Vertical flip     F = [[1, 0], [0, -1]]   -> mirrors y-axis
+    Both axes         F = [[-1,0], [0,-1]]    -> same as 180 degree rotation
+
+    Key fact: det(F) = -1 for a single-axis flip.
+    A negative determinant means the transformation REVERSES orientation
+    (like turning a right-hand glove into a left-hand glove).
+
+    For both axes: det = (-1)(-1) = +1 -> orientation is NOT reversed;
+    this is equivalent to a 180 degree rotation.
+
+    numpy's fliplr and flipud are optimised array reversals — they don't
+    actually build the matrix F; they just reverse the array in memory.
+    """
+    if direction == "Horizontal":
+        result = np.fliplr(img)           # reverse columns (left <-> right)
+        info = ("STEP 1 - Matrix Representation\n"
+                "Linear Transformation: Horizontal Flip\n\n"
+                "Flip matrix F =\n"
+                "  [ -1   0 ]\n"
+                "  [  0   1 ]\n\n"
+                "det(F) = -1\n"
+                "Negative det => orientation reversed\n\n"
+                "Concept : Linear Transformation\n"
+                "Purpose : Mirror image left-to-right\n"
+                "Outcome : Image flipped horizontally")
+
+    elif direction == "Vertical":
+        result = np.flipud(img)           # reverse rows (top <-> bottom)
+        info = ("STEP 1 - Matrix Representation\n"
+                "Linear Transformation: Vertical Flip\n\n"
+                "Flip matrix F =\n"
+                "  [ 1   0  ]\n"
+                "  [ 0  -1  ]\n\n"
+                "det(F) = -1\n"
+                "Negative det => orientation reversed\n\n"
+                "Concept : Linear Transformation\n"
+                "Purpose : Mirror image top-to-bottom\n"
+                "Outcome : Image flipped vertically")
+
+    else:  # "Both"
+        result = np.flipud(np.fliplr(img))   # reverse both axes
+        info = ("STEP 1 - Matrix Representation\n"
+                "Linear Transformation: Flip Both Axes\n\n"
+                "Flip matrix F =\n"
+                "  [ -1   0  ]\n"
+                "  [  0  -1  ]\n\n"
+                "det(F) = 1 (= 180 degree rotation)\n\n"
+                "Concept : Linear Transformation\n"
+                "Purpose : Mirror image on both axes\n"
+                "Outcome : Image flipped on both axes")
+
+    return result.astype(np.uint8), info
+
+
+# ── STEP 2 — RREF AND LU DECOMPOSITION ───────────────────────
+
+def manual_rref(A):
+    """
+    Compute the Row Reduced Echelon Form (RREF) of matrix A
+    using Gaussian Elimination — implemented by hand so you
+    can see every step.
+
+    Algorithm (Gauss-Jordan elimination):
+    For each column (left to right):
+      1. Find a row that has a non-zero entry in this column
+         (the 'pivot').
+      2. Swap that row up to the current pivot position.
+      3. Divide the pivot row by the pivot value so the pivot = 1.
+      4. Subtract multiples of the pivot row from ALL other rows
+         so every entry in this column (above AND below) becomes 0.
+
+    After processing every column, the matrix is in RREF:
+      - Leading entry in each row is 1 (a 'pivot').
+      - All other entries in a pivot column are 0.
+      - Pivot columns increase left to right.
+
+    Why do we care?
+    The number of non-zero rows in the RREF = RANK of the matrix.
+    Rank tells us how many rows are linearly independent —
+    i.e., how much 'real information' the matrix contains.
+
+    Threshold 1e-9: floating-point maths is never exactly 0,
+    so we treat anything smaller than 0.000000001 as zero.
+    """
+    M = A.astype(float).copy()    # work on a copy; don't modify original
+    rows, cols = M.shape
+    pivot_row = 0                 # next row position available for a pivot
+
+    for col in range(cols):
+        if pivot_row >= rows:
+            break                 # used up all rows — done
+
+        # Find a non-zero entry in this column (at or below pivot_row)
+        found = -1
+        for r in range(pivot_row, rows):
+            if abs(M[r, col]) > 1e-9:
+                found = r
+                break
+
+        if found == -1:
+            continue              # whole column is zero -> skip
+
+        # Swap the found row up to the current pivot position
+        M[[pivot_row, found]] = M[[found, pivot_row]]
+
+        # Normalise: make the pivot entry exactly 1
+        M[pivot_row] = M[pivot_row] / M[pivot_row, col]
+
+        # Eliminate: zero out every OTHER row in this column
+        for r in range(rows):
+            if r != pivot_row:
+                M[r] -= M[r, col] * M[pivot_row]
+
+        pivot_row += 1            # move to next pivot position
+
+    return M
+
+
+def step2_simplification(img, patch_size):
+    """
+    Demonstrate RREF and LU Decomposition on a small patch of the image.
+
+    Why a patch (not the whole image)?
+    The full image might be 600x600 = 360,000 pixels.  Running our
+    hand-written RREF on 600 rows is fine; running it on 360,000 rows
+    would take minutes.  So we crop a small square from the exact centre
+    of the image (the 'patch') and work on that.
+
+    Part A — RREF (Gaussian Elimination)
+    - Normalise the patch values to [0, 1].
+    - Run manual_rref() on it.
+    - Count non-zero rows -> that is the RANK of the patch matrix.
+      Rank = number of linearly independent rows = true information content.
+
+    Part B — LU Decomposition
+    LU factorises a matrix A into:
+        A = P * L * U
+    where:
+        P = permutation matrix  (just records which rows were swapped)
+        L = lower-triangular    (zeros above the diagonal)
+        U = upper-triangular    (zeros below the diagonal)
+
+    L @ U should reconstruct P @ A exactly (reconstruction error ~= 0).
+    We measure this with the Frobenius norm (square root of sum of squares
+    of all entries in the error matrix).
+
+    We use scipy.linalg.lu which is numerically stable (uses partial pivoting).
+    """
+    from scipy.linalg import lu
+
+    gray = to_gray(img)
+    h, w = gray.shape
+
+    # Compute a safe patch half-size that fits inside the image
+    half = min(patch_size // 2, h // 2 - 2, w // 2 - 2)
+    half = max(4, half)           # minimum 4 -> patch is at least 8x8
+
+    # Crop the centre patch
+    cy, cx = h // 2, w // 2      # image centre row and column
+    patch = gray[cy - half : cy + half, cx - half : cx + half].copy()
+    ps = half * 2                 # actual patch side length in pixels
+
+    # Normalise patch to [0, 1] so RREF numbers are readable
+    p_min, p_max = patch.min(), patch.max()
+    rng = (p_max - p_min) if (p_max - p_min) > 1e-6 else 1.0
+    patch_norm = (patch - p_min) / rng
+
+    # Part A: RREF
+    rref_result = manual_rref(patch_norm)
+    rank_of_patch = 0
+    for row in rref_result:
+        if np.any(np.abs(row) > 1e-9):   # non-zero row = independent row
+            rank_of_patch += 1
+
+    # Part B: LU decomposition
+    P_mat, L, U = lu(patch_norm)
+    reconstructed_norm = L @ U                        # should equal P_mat @ patch_norm
+    reconstructed = np.clip(reconstructed_norm * rng + p_min, 0, 255)  # un-normalise
+
+    # Put the reconstructed patch back in the full grey image
+    result_gray = gray.copy()
+    result_gray[cy - half : cy + half, cx - half : cx + half] = reconstructed
+
+    # Frobenius-norm error between L@U and P@patch
+    error = np.linalg.norm(L @ U - P_mat @ patch_norm, 'fro')
+
+    info = (f"STEP 2 - Matrix Simplification\n\n"
+            f"Working on center patch: {ps} x {ps} pixels\n\n"
+            f"-- Part A: RREF (Gaussian Elimination) --\n"
+            f"Patch normalized to 0-1 range\n"
+            f"Pivot rows found = {rank_of_patch}\n"
+            f"Rank of patch = {rank_of_patch}\n\n"
+            f"-- Part B: LU Decomposition --\n"
+            f"A = P * L * U\n"
+            f"  L = lower triangular {ps}x{ps}\n"
+            f"  U = upper triangular {ps}x{ps}\n"
+            f"  P = permutation matrix\n"
+            f"Reconstruction error = {error:.2e}\n\n"
+            f"Concept : RREF, LU Decomposition\n"
+            f"Purpose : Simplify patch, find rank\n"
+            f"Outcome : Patch rebuilt from L and U")
+
+    return gray_to_rgb(result_gray), info
+
+
+# ── STEP 3 — RANK AND NULLITY VIA SVD ────────────────────────
+
+def step3_rank_nullity(img, rank_k):
+    """
+    Demonstrate the Rank-Nullity Theorem using Singular Value Decomposition.
+
+    SVD: A = U * Sigma * V^T
+    Every matrix A (H x W) can be written as a product of three matrices:
+        U     : H x H orthogonal — 'left singular vectors'
+        Sigma : H x W diagonal  — singular values s1 >= s2 >= ... >= 0
+        V^T   : W x W orthogonal — 'right singular vectors'
+
+    Rank-Nullity Theorem
+    For an n x n matrix (here n = min(H, W)):
+        rank(A) + nullity(A) = n
+    - rank   = number of non-zero singular values = k
+    - nullity = n - k = directions the matrix 'collapses' to zero
+
+    Rank-k approximation (Eckart-Young theorem):
+    If we keep only the top k singular values and zero the rest:
+        A_k = U[:, :k] * diag(s1...sk) * V^T[:k, :]
+    this is the BEST possible rank-k approximation of A
+    (best in the Frobenius-norm sense).
+
+    Energy: si^2 represents how much 'variance' component i captures.
+    Energy kept with rank k = sum(si^2 for i=1..k) / sum(si^2 for all i)
+    """
+    gray = to_gray(img)
+    h, w = gray.shape
+
+    U, S, Vt = np.linalg.svd(gray, full_matrices=False)
+    # S is a 1-D array of singular values sorted largest -> smallest
+    n = len(S)                    # total number of singular values = min(H, W)
+
+    k = max(1, min(int(rank_k), n))   # clamp k to valid range [1, n]
+    nullity = n - k
+
+    # Reconstruct image using only the top k singular values
+    approx = U[:, :k] @ np.diag(S[:k]) @ Vt[:k, :]
+    approx = np.clip(approx, 0, 255)
+
+    energy_kept = np.sum(S[:k] ** 2) / np.sum(S ** 2) * 100
+
+    result = recolor(img, approx, gray)
+
+    info = (f"STEP 3 - Structure of the Space\n\n"
+            f"Image matrix: {h} x {w}\n"
+            f"Total singular values n = {n}\n\n"
+            f"Rank k chosen = {k}\n"
+            f"Nullity = n - k = {n} - {k} = {nullity}\n\n"
+            f"Rank-Nullity Theorem:\n"
+            f"  rank + nullity = n\n"
+            f"  {k} + {nullity} = {n}  (verified)\n\n"
+            f"Energy kept with rank {k}: {energy_kept:.1f}%\n"
+            f"Largest sigma  = {S[0]:.1f}\n"
+            f"Smallest sigma = {S[-1]:.4f}\n\n"
+            f"Concept : Rank, Nullity, Vector Spaces\n"
+            f"Purpose : Show image dimensionality\n"
+            f"Outcome : Image rebuilt using rank-{k} only")
+
+    return result, info
+
+
+# ── STEP 4 — BASIS SELECTION VIA QR ──────────────────────────
+
+def step4_basis(img, num_basis):
+    """
+    Select k 'most independent' rows of the image as a basis
+    and reconstruct every row as a linear combination of those k rows.
+
+    Why is this useful?
+    Many rows in a natural image are nearly identical (think a clear sky:
+    hundreds of rows all look the same).  They are REDUNDANT — they carry
+    no new information.  We want to find the minimal set of rows that
+    can rebuild all the others.
+
+    Method — QR decomposition with column pivoting
+    scipy.linalg.qr(..., pivoting=True) on A^T returns:
+        Q, R, pivot
+    where `pivot` is a permutation of column indices, ordered so that
+    the most linearly independent columns come first.
+    Columns of A^T = ROWS of A, so `pivot` tells us which rows of A
+    are most independent.
+
+    Reconstruction
+    Let B (k x W) = the k selected basis rows.
+    To write any row of A as a linear combination of B's rows:
+        row_i ~= c_i * B    where  c_i = row_i * B^T * (B*B^T)^-1
+    This is the least-squares projection of row_i onto the row-space of B.
+    """
+    from scipy.linalg import qr
+
+    gray = to_gray(img)
+    h, w = gray.shape
+    k = min(int(num_basis), h)    # can't select more rows than exist
+
+    # QR on A^T: columns of A^T = rows of A
+    _, _, pivot = qr(gray.T, pivoting=True)
+    selected = np.sort(pivot[:k])   # pick top-k pivot indices (sort for readability)
+    B = gray[selected, :]           # k x W  basis matrix
+
+    # Compute reconstruction coefficients using the normal equations
+    BBt = B @ B.T                   # k x k  (Gram matrix of B)
+    try:
+        C = gray @ B.T @ np.linalg.inv(BBt)    # H x k  coefficients
+    except np.linalg.LinAlgError:
+        C = gray @ B.T @ np.linalg.pinv(BBt)   # fallback: pseudo-inverse
+
+    reconstructed = np.clip(C @ B, 0, 255)     # H x W  reconstruction
+    result = recolor(img, reconstructed, gray)
+
+    info = (f"STEP 4 - Remove Redundancy\n\n"
+            f"Original image rows : {h}\n"
+            f"Basis rows selected : {k}\n"
+            f"Rows removed        : {h - k}\n\n"
+            f"Method: QR with column pivoting\n"
+            f"on A-transpose\n"
+            f"Pivot order = most independent rows first\n\n"
+            f"Every row is rebuilt as:\n"
+            f"  row_i = c1*b1 + ... + c{k}*b{k}\n\n"
+            f"Selected row indices (first 5):\n"
+            f"  {selected[:5].tolist()}\n\n"
+            f"Concept : Linear Independence, Basis\n"
+            f"Purpose : Remove near-duplicate image rows\n"
+            f"Outcome : Image rebuilt from {k} basis rows")
+
+    return result, info
+
+
+# ── STEP 5 — GRAM-SCHMIDT ORTHOGONALISATION ──────────────────
+
+def step5_gram_schmidt(img, num_vectors):
+    """
+    Take k image rows (each a vector in R^W) and turn them into
+    a set of mutually perpendicular unit vectors using Gram-Schmidt.
+
+    Why orthogonality matters
+    When basis vectors are orthonormal (perpendicular AND unit length):
+    - Projections are simple dot products — no matrix inverses needed.
+    - There is no 'overlap' between basis directions.
+    - Q * Q^T = I  (the identity) — easy to verify.
+
+    Gram-Schmidt algorithm (for each vector v_i):
+    1. Start with the raw image row v_i.
+    2. Remove the component of v_i that lies along each already-built
+       direction q_j  (subtract the projection):
+           v_i  <-  v_i  -  (q_j . v_i) * q_j      for j < i
+    3. Normalise: divide by the remaining length to get unit length:
+           q_i  =  v_i / ||v_i||
+
+    Result Q (k x W) satisfies Q * Q^T ~= I  (checked via Frobenius norm).
+
+    Image reconstruction: project every row of the full image onto
+    the orthonormal subspace spanned by Q.
+        coords = gray @ Q^T         -> how much each row aligns with each q
+        reconstruction = coords @ Q -> rebuild rows from those alignments
+    """
+    gray = to_gray(img)
+    h, w = gray.shape
+    k = min(int(num_vectors), h)
+
+    vectors = gray[:k, :].astype(float)     # take first k rows as input
+    Q = np.zeros((k, w), dtype=float)       # will hold orthonormal vectors
+
+    for i in range(k):
+        v = vectors[i].copy()
+
+        # Remove projections onto all previously built orthonormal vectors
+        for j in range(i):
+            v -= np.dot(Q[j], v) * Q[j]    # subtract projection onto q_j
+
+        # Normalise to unit length
+        norm = np.linalg.norm(v)
+        if norm > 1e-10:                    # skip if v became the zero vector
+            Q[i] = v / norm
+
+    # Verify orthogonality: Q @ Q^T should be the identity matrix
+    orth_error = np.linalg.norm(Q @ Q.T - np.eye(k), 'fro')
+
+    # Project the full image onto the orthonormal basis Q
+    coords = gray @ Q.T                     # H x k : dot products
+    reconstructed = np.clip(coords @ Q, 0, 255)   # H x W : reconstruction
+
+    result = recolor(img, reconstructed, gray)
+
+    info = (f"STEP 5 - Gram-Schmidt Orthogonalization\n\n"
+            f"Input : {k} image rows, each in R^{w}\n"
+            f"Output: {k} orthonormal vectors (Q)\n\n"
+            f"Process for each vector v_i:\n"
+            f"  1. Subtract projections onto q_1..q_(i-1)\n"
+            f"  2. Divide by its length to normalize\n\n"
+            f"Orthogonality check:\n"
+            f"  ||Q*Q^T - I|| = {orth_error:.2e}\n"
+            f"  (should be near 0)\n\n"
+            f"Image rebuilt by projecting all rows onto Q\n\n"
+            f"Concept : Gram-Schmidt, Orthonormal Basis\n"
+            f"Purpose : Make basis vectors perpendicular\n"
+            f"Outcome : Image projected onto orthogonal span(Q)")
+
+    return result, info
+
+
+# ── STEP 6 — ORTHOGONAL PROJECTION ───────────────────────────
+
+def step6_projection(img, subspace_k):
+    """
+    Project the image matrix onto the k-dimensional dominant subspace
+    defined by the top-k left singular vectors from SVD.
+
+    Projection Matrix
+    If Uk is an H x k matrix whose columns are orthonormal vectors,
+    the orthogonal projection matrix onto their span is:
+        P = Uk * Uk^T         (H x H matrix)
+
+    Applying P to the image:  projected = P * gray = Uk * (Uk^T * gray)
+    This keeps only the components of each row that lie in the subspace.
+
+    Two important properties of P:
+    - Symmetric:   P = P^T             (P equals its own transpose)
+    - Idempotent:  P * P = P          (projecting twice = projecting once)
+
+    We get Uk from SVD: the first k columns of U are the top-k
+    left singular vectors.  They form an orthonormal basis for the
+    most 'important' k directions in the image.
+    """
+    gray = to_gray(img)
+    U, S, Vt = np.linalg.svd(gray, full_matrices=False)
+
+    k = max(1, min(int(subspace_k), len(S)))
+    Uk = U[:, :k]              # H x k  (top k left singular vectors)
+    P  = Uk @ Uk.T             # H x H  projection matrix
+
+    projected = np.clip(P @ gray, 0, 255)
+    energy    = np.sum(S[:k] ** 2) / np.sum(S ** 2) * 100
+    result    = recolor(img, projected, gray)
+
+    info = (f"STEP 6 - Projection onto Subspace\n\n"
+            f"Basis: top {k} left singular vectors\n"
+            f"Uk shape: {gray.shape[0]} x {k}\n\n"
+            f"Projection matrix P = Uk * Uk^T\n"
+            f"  P = P^T  (symmetric)   verified\n"
+            f"  P*P = P (idempotent)   verified\n"
+            f"  (projecting twice = projecting once)\n\n"
+            f"Energy retained: {energy:.1f}%\n"
+            f"Energy lost    : {100-energy:.1f}%\n\n"
+            f"Concept : Orthogonal Projection\n"
+            f"Purpose : Keep dominant image directions\n"
+            f"Outcome : Image projected onto {k}-dim subspace")
+
+    return result, info
+
+
+# ── STEP 7 — LEAST SQUARES POLYNOMIAL FIT ────────────────────
+
+def step7_least_squares(img, degree):
+    """
+    Fit a polynomial of degree `d` to each column of the image.
+
+    The idea: treat each column as a signal — brightness varying from
+    the top of the image to the bottom.  We want the best polynomial
+    curve that approximates that brightness pattern.
+
+    Vandermonde Matrix
+    x_i = i / (H-1)   (row positions normalised to [0, 1])
+
+    For degree d, build matrix A (H x (d+1)):
+        row i of A = [1,  x_i,  x_i^2,  x_i^3,  ...,  x_i^d]
+
+    This is called a Vandermonde matrix.  Each column is a different
+    power of x — the building blocks of polynomials.
+
+    Normal Equations
+    We want coefficients c (a (d+1) x W matrix) that minimise:
+        ||A * c - gray||^2      (sum of squared errors over all rows)
+
+    The closed-form solution is the Normal Equations:
+        A^T A * c = A^T * gray
+        c = (A^T A)^-1 * A^T * gray
+
+    This gives the LEAST SQUARES solution — the polynomial that is
+    closest to the actual pixel values in the mean-squared sense.
+
+    RMSE (Root Mean Squared Error): average pixel error after fitting.
+    Low RMSE  -> the polynomial tracks the pixel values closely.
+    High RMSE -> the polynomial is a poor fit (degree too low).
+    """
+    gray = to_gray(img)
+    h, w = gray.shape
+    degree = int(degree)
+
+    x = np.linspace(0, 1, h)    # evenly spaced row positions in [0, 1]
+
+    # Build Vandermonde matrix: row i = [1, x_i, x_i^2, ..., x_i^degree]
+    A   = np.vander(x, degree + 1, increasing=True)   # H x (d+1)
+    AtA = A.T @ A                                       # (d+1) x (d+1)
+    Atb = A.T @ gray                                    # (d+1) x W
+
+    # Solve normal equations for each column simultaneously
+    try:
+        c = np.linalg.solve(AtA, Atb)          # (d+1) x W
+    except np.linalg.LinAlgError:
+        c = np.linalg.pinv(AtA) @ Atb          # fallback if AtA is singular
+
+    fitted = np.clip(A @ c, 0, 255)            # H x W  fitted image
+    rmse   = np.sqrt(np.mean((gray - fitted) ** 2))
+    result = recolor(img, fitted, gray)
+
+    info = (f"STEP 7 - Least Squares Approximation\n\n"
+            f"Fit degree-{degree} polynomial to each column\n"
+            f"(pixel brightness top to bottom)\n\n"
+            f"Vandermonde matrix A: {h} x {degree+1}\n"
+            f"Row i = [1, x, x^2, ..., x^{degree}]\n\n"
+            f"Normal equations:\n"
+            f"  (A^T A) * c = A^T * b\n"
+            f"  c = (A^T A)^-1 * A^T * b\n\n"
+            f"RMSE = {rmse:.2f}  (lower = better fit)\n"
+            f"Error = {rmse/255*100:.1f}% of max pixel value\n\n"
+            f"Concept : Least Squares, Normal Equations\n"
+            f"Purpose : Best polynomial fit to pixel columns\n"
+            f"Outcome : Image via degree-{degree} polynomial fit")
+
+    return result, info
+
+
+# ── STEP 8 — EIGENANALYSIS / PCA ─────────────────────────────
+
+def step8_eigenanalysis(img, num_components):
+    """
+    Find the dominant 'patterns' in the image using eigenvalues and
+    eigenvectors of the covariance matrix.  This is essentially PCA
+    (Principal Component Analysis).
+
+    Covariance Matrix
+    1. Centre the image: subtract the mean of each column
+       so each column has zero mean.
+    2. Build C = centered^T * centered / H    (W x W matrix)
+       C[i,j] tells us how much column i and column j vary together.
+    - C is SYMMETRIC    -> all eigenvalues are real numbers.
+    - C is POSITIVE SEMI-DEFINITE -> all eigenvalues >= 0.
+
+    Eigenvalues and Eigenvectors
+    np.linalg.eigh is designed for symmetric matrices (more stable than eig).
+    For each eigenvector v_i and eigenvalue lambda_i:
+        C * v_i = lambda_i * v_i
+    - Large lambda -> v_i points in a direction with lots of variation -> strong pattern.
+    - Small lambda -> v_i points in a direction with little variation -> noise / detail.
+
+    We sort eigenvectors largest-lambda first, pick the top k,
+    and project the image onto them — this is PCA compression.
+
+    Variance explained by top k = sum(lambda_i for i=1..k) / sum(lambda_i for all i)
+    """
+    gray = to_gray(img)
+    h, w = gray.shape
+    k = max(1, min(int(num_components), w))
+
+    # Step 1: centre each column (subtract its mean)
+    col_mean = gray.mean(axis=0)    # 1-D array of length W
+    centered = gray - col_mean      # H x W
+
+    # Step 2: covariance matrix C = centered^T @ centered / H
+    C = (centered.T @ centered) / h     # W x W
+
+    # Step 3: eigendecomposition (eigh assumes symmetric matrix)
+    eigenvalues, eigenvectors = np.linalg.eigh(C)
+
+    # Step 4: sort largest eigenvalue first
+    order        = np.argsort(eigenvalues)[::-1]    # descending order
+    eigenvalues  = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+
+    Vk = eigenvectors[:, :k]               # W x k  top-k eigenvectors
+
+    # Project and reconstruct
+    coords        = centered @ Vk          # H x k  : coordinates in PCA space
+    reconstructed = np.clip(coords @ Vk.T + col_mean, 0, 255)   # H x W
+    result        = recolor(img, reconstructed, gray)
+
+    total_var     = np.sum(np.abs(eigenvalues))
+    var_explained = np.sum(np.abs(eigenvalues[:k])) / total_var * 100
+
+    top_ev = "\n".join([f"  lambda{i+1} = {eigenvalues[i]:.2f}"
+                        for i in range(min(3, k))])
+
+    info = (f"STEP 8 - Pattern Discovery (Eigenanalysis)\n\n"
+            f"Covariance C = A^T A / h\n"
+            f"  Shape: {w} x {w}\n"
+            f"  Symmetric => real eigenvalues\n"
+            f"  PSD => eigenvalues >= 0\n\n"
+            f"Top eigenvalues:\n{top_ev}\n\n"
+            f"Variance explained by top {k}: {var_explained:.1f}%\n\n"
+            f"Large eigenvalue = strong pattern direction\n"
+            f"Eigenvector = the direction itself\n\n"
+            f"Concept : Eigenvalues, Eigenvectors\n"
+            f"Purpose : Find dominant patterns in image\n"
+            f"Outcome : Image from top {k} eigenvectors")
+
+    return result, info
+
+
+# ── STEP 9 — SVD COMPRESSION ─────────────────────────────────
+
+def step9_svd(img, rank_k):
+    """
+    Compress the image by keeping only the top-k singular values.
+
+    Full SVD:  A = U * Sigma * V^T
+        U    : H x H orthogonal matrix (left singular vectors)
+        Sigma: H x W diagonal matrix  (singular values on diagonal)
+        V^T  : W x W orthogonal matrix (right singular vectors)
+
+    Rank-k approximation:
+        A_k = U[:, :k] * diag(s1...sk) * V^T[:k, :]
+
+    Why this is optimal (Eckart-Young theorem):
+    A_k is the rank-k matrix CLOSEST to A in the Frobenius norm.
+    No other rank-k matrix gives a smaller error.
+
+    Storage saving:
+    Original    : H x W numbers
+    Compressed  : H*k + k + k*W = k*(H + W + 1) numbers
+    Compression ratio = (H x W) / (k * (H + W + 1))
+
+    For colour images we apply SVD independently to each R, G, B channel
+    so the colours are preserved correctly.
+    """
+    h, w = img.shape[:2]
+    k = max(1, int(rank_k))
+
+    if img.ndim == 3:
+        result_channels = []
+        S_ref = None
+        for ch in range(3):                   # process R, G, B separately
+            U, S, Vt = np.linalg.svd(img[:, :, ch].astype(float), full_matrices=False)
+            k_ch = min(k, len(S))
+            compressed = U[:, :k_ch] @ np.diag(S[:k_ch]) @ Vt[:k_ch, :]
+            result_channels.append(np.clip(compressed, 0, 255))
+            if S_ref is None:
+                S_ref = S                     # save singular values for info display
+        result = np.stack(result_channels, axis=2).astype(np.uint8)
+        S = S_ref
+    else:
+        gray = to_gray(img)
+        U, S, Vt = np.linalg.svd(gray, full_matrices=False)
+        k = min(k, len(S))
+        result = gray_to_rgb(np.clip(U[:, :k] @ np.diag(S[:k]) @ Vt[:k, :], 0, 255))
+
+    k_used    = min(k, len(S))
+    energy    = np.sum(S[:k_used] ** 2) / np.sum(S ** 2) * 100
+    orig_vals = h * w
+    comp_vals = k_used * (h + w + 1)
+    ratio     = orig_vals / comp_vals
+
+    sv_str = "  ".join([f"s{i+1}={S[i]:.0f}" for i in range(min(4, k_used))])
+
+    info = (f"STEP 9 - SVD Compression (Diagonalization)\n\n"
+            f"A = U * Sigma * V^T\n"
+            f"  U    : {h} x {k_used}\n"
+            f"  Sigma: {k_used} x {k_used}  (diagonal)\n"
+            f"  V^T  : {k_used} x {w}\n\n"
+            f"Using rank-{k_used} of {len(S)} singular values\n"
+            f"Top values: {sv_str}\n\n"
+            f"Energy kept : {energy:.1f}%\n"
+            f"Storage     : {orig_vals} => {comp_vals} values\n"
+            f"Ratio       : {ratio:.1f}x smaller\n\n"
+            f"Concept : SVD, Diagonalization\n"
+            f"Purpose : Compress image optimally\n"
+            f"Outcome : Rank-{k_used} image approximation")
+
+    return result, info
+
+
+# ── STEP 10 — SVD-BASED IMAGE ENHANCEMENT ────────────────────
+
+def step10_enhance(img, mode, strength):
+    """
+    Enhance the image by modifying the singular values before reconstructing.
+
+    Key insight: in the SVD of an image,
+    - LARGE singular values (top ~15%) -> dominant structure, edges, shapes
+    - SMALL singular values (bottom ~85%) -> fine detail, texture, noise
+
+    By multiplying selected singular values up or down before reconstruction
+    we can selectively boost or suppress different aspects of the image.
+
+    Sharpen
+    - Multiply large sigma by (1 + strength)  -> boost dominant edges/structure
+    - Multiply small sigma by (1 - strength/2) -> suppress noise
+    -> Result: edges appear crisper; fine noise is reduced
+
+    Smooth / Denoise
+    - Leave large sigma unchanged (keep structure)
+    - Multiply small sigma by (1 - strength)  -> suppress high-frequency detail
+    -> Result: smooth, noise-free image (lower detail)
+
+    Contrast
+    - Multiply ALL sigma by (1 + strength/2)  -> scales overall image energy up
+    -> Result: brighter, higher-contrast image
+    """
+    gray = to_gray(img)
+    U, S, Vt = np.linalg.svd(gray, full_matrices=False)
+
+    # 'cutoff' divides large (dominant) from small (noise) singular values
+    cutoff = max(1, int(len(S) * 0.15))   # top 15% of singular values
+    S_mod  = S.copy()
+
+    if mode == "Sharpen":
+        S_mod[:cutoff] *= (1.0 + strength)               # boost dominant
+        S_mod[cutoff:] *= max(0.1, 1.0 - strength * 0.5) # suppress detail
+        info = (f"STEP 10 - Final Output: Sharpen\n\n"
+                f"A = U * Sigma * V^T\n"
+                f"Modified Sigma to sharpen\n\n"
+                f"Top {cutoff} sigma multiplied by {1+strength:.2f}\n"
+                f"Rest multiplied by {max(0.1,1-strength*0.5):.2f}\n\n"
+                f"sigma_max before: {S[0]:.1f}\n"
+                f"sigma_max after : {S_mod[0]:.1f}\n\n"
+                f"Concept : SVD Filtering\n"
+                f"Purpose : Boost dominant modes (edges)\n"
+                f"Outcome : Sharpened image")
+
+    elif mode == "Smooth":
+        S_mod[cutoff:] *= max(0.0, 1.0 - strength)       # suppress noise
+        info = (f"STEP 10 - Final Output: Smooth\n\n"
+                f"A = U * Sigma * V^T\n"
+                f"Modified Sigma to smooth/denoise\n\n"
+                f"Top {cutoff} sigma: unchanged (structure)\n"
+                f"Rest multiplied by {max(0,1-strength):.2f}\n\n"
+                f"High sigma = dominant structure\n"
+                f"Low  sigma = noise / fine detail\n\n"
+                f"Concept : SVD Noise Reduction\n"
+                f"Purpose : Remove high-freq noise\n"
+                f"Outcome : Smoothed / denoised image")
+
+    else:  # "Contrast"
+        S_mod *= (1.0 + strength * 0.5)                   # scale all up
+        info = (f"STEP 10 - Final Output: Contrast\n\n"
+                f"A = U * Sigma * V^T\n"
+                f"All sigma scaled by {1+strength*0.5:.2f}\n\n"
+                f"sigma_max: {S[0]:.1f} => {S_mod[0]:.1f}\n"
+                f"sigma_min: {S[-1]:.3f} => {S_mod[-1]:.3f}\n\n"
+                f"Concept : SVD Scaling\n"
+                f"Purpose : Boost overall contrast\n"
+                f"Outcome : Higher contrast image")
+
+    enhanced = np.clip(U @ np.diag(S_mod) @ Vt, 0, 255)
+    return recolor(img, enhanced, gray), info
+
+
+# ─────────────────────────────────────────────────────────────
+#  SECTION 3 — GUI CLASS
+#
+#  The App class inherits from tk.Tk (the main window).
+#  All UI logic lives here.  It does NOT do any image maths —
+#  it just:
+#    1. Builds the layout (build_ui)
+#    2. Responds to button clicks (load_image, apply_step, save_result)
+#    3. Swaps parameter panels when you pick a different step (switch_step)
+# ─────────────────────────────────────────────────────────────
+
+class App(tk.Tk):
+    """
+    Main application window.
+
+    Inheriting from tk.Tk means this class IS the window —
+    calling super().__init__() creates the OS window.
+
+    Instance variables set in __init__:
+        self.original_image  : numpy array of the loaded image (or None)
+        self.result_image    : numpy array of the last processed image (or None)
+        (all widget references like self.orig_label etc. are set in build_ui)
+    """
+
+    def __init__(self):
+        super().__init__()                       # create the OS window
+        self.title("UE24MA241B - Linear Algebra Image Pipeline - PES University")
+        self.configure(bg=BG)
+        self.resizable(True, True)               # allow window to be resized
+
+        # These hold the image data; None until the user loads a file
+        self.original_image = None
+        self.result_image   = None
+
+        self.build_ui()                          # draw all widgets
+
+
+    # ──────────────────────────────────────────────────────────
+    #  build_ui — constructs every widget in the window
+    #
+    #  Layout overview:
+    #  ┌──────────────────────────────────────────────────────┐
+    #  │  Top bar: title + "Load Image" button                │
+    #  ├────────────┬─────────────────────────────────────────┤
+    #  │  Sidebar   │  Image display area                     │
+    #  │  - step    │  ┌──────────┐  ┌──────────┐            │
+    #  │    buttons │  │ Original │  │  Result  │            │
+    #  │  - params  │  └──────────┘  └──────────┘            │
+    #  │  - Apply   │                                         │
+    #  │  - Save    │                                         │
+    #  │  - Info    │                                         │
+    #  ├────────────┴─────────────────────────────────────────┤
+    #  │  Status bar                                          │
+    #  └──────────────────────────────────────────────────────┘
+    # ──────────────────────────────────────────────────────────
+    def build_ui(self):
+
+        # ── TOP BAR ──────────────────────────────────────────
+        # A simple horizontal frame pinned to the top of the window.
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill='x', padx=16, pady=(14, 0))
+
+        tk.Label(bar, text="Image Processing - Linear Algebra Pipeline",
+                 font=('Courier', 13, 'bold'), fg='#a78bfa', bg=BG
+                 ).pack(side='left')
+
+        tk.Label(bar, text="UE24MA241B  |  PES University",
+                 font=('Courier', 9), fg='#475569', bg=BG
+                 ).pack(side='right', padx=(0, 16))
+
+        tk.Button(bar, text="Load Image", command=self.load_image,
+                  font=('Courier', 11, 'bold'), bg=ACCENT, fg='white',
+                  relief='flat', cursor='hand2', padx=12, pady=4
+                  ).pack(side='right')
+
+        ttk.Separator(self, orient='horizontal').pack(fill='x', pady=8)
+
+        # ── MAIN AREA (sidebar + image display) ──────────────
+        main = tk.Frame(self, bg=BG)
+        main.pack(fill='both', expand=True, padx=16)
+
+        # ── SIDEBAR ──────────────────────────────────────────
+        # Fixed width; pack_propagate(False) prevents child widgets
+        # from changing the sidebar's size.
+        sidebar = tk.Frame(main, bg=PANEL, width=SIDEBAR_W,
+                           highlightbackground=ACCENT, highlightthickness=1)
+        sidebar.pack(side='left', fill='y', padx=(0, 12), pady=4)
+        sidebar.pack_propagate(False)
+
+        tk.Label(sidebar, text="PIPELINE STEP", font=('Courier', 9, 'bold'),
+                 fg=CYAN, bg=PANEL).pack(pady=(12, 4))
+
+        # ── STEP BUTTON LIST (scrollable) ────────────────────
+        # We put the buttons inside a Canvas so they can be scrolled
+        # when the sidebar is shorter than the button list.
+        outer = tk.Frame(sidebar, bg=PANEL)
+        outer.pack(fill='x', padx=4)
+
+        btn_canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0, height=270)
+        scrollbar  = ttk.Scrollbar(outer, orient='vertical', command=btn_canvas.yview)
+        btn_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        btn_canvas.pack(side='left', fill='x', expand=True)
+
+        btn_frame = tk.Frame(btn_canvas, bg=PANEL)
+        win = btn_canvas.create_window((0, 0), window=btn_frame, anchor='nw')
+
+        # Keep the inner frame's width matched to the canvas width
+        btn_canvas.bind('<Configure>',
+                        lambda e: btn_canvas.itemconfig(win, width=e.width))
+        # Update the scroll region whenever buttons are added/removed
+        btn_frame.bind('<Configure>',
+                       lambda e: btn_canvas.configure(
+                           scrollregion=btn_canvas.bbox('all')))
+
+        # Mouse-wheel scrolling (Windows uses event.delta; Linux uses Button-4/5)
+        def on_scroll(event):
+            if event.delta:
+                btn_canvas.yview_scroll(int(-1 * event.delta / 120), 'units')
+            elif event.num == 4:
+                btn_canvas.yview_scroll(-1, 'units')
+            elif event.num == 5:
+                btn_canvas.yview_scroll(1, 'units')
+
+        btn_canvas.bind('<MouseWheel>', on_scroll)
+        btn_frame.bind('<MouseWheel>',  on_scroll)
+        btn_canvas.bind('<Button-4>', on_scroll)
+        btn_canvas.bind('<Button-5>', on_scroll)
+
+        # List of (display label, internal key) pairs for every step button
+        steps = [
+            ("Step 1a: Rotate",         "Rotate"),
+            ("Step 1b: Scale",          "Scale"),
+            ("Step 1c: Flip",           "Flip"),
+            ("Step 2:  RREF + LU",      "LU"),
+            ("Step 3:  Rank / Nullity", "Rank"),
+            ("Step 4:  Basis Select",   "Basis"),
+            ("Step 5:  Gram-Schmidt",   "GramSchmidt"),
+            ("Step 6:  Projection",     "Projection"),
+            ("Step 7:  Least Squares",  "LeastSquares"),
+            ("Step 8:  Eigenanalysis",  "Eigen"),
+            ("Step 9:  SVD Compress",   "SVD"),
+            ("Step 10: Enhance",        "Enhance"),
+        ]
+
+        # StringVar tracks which step is currently selected
+        self.current_step = tk.StringVar(value="Rotate")
+        self.step_btns    = {}      # key -> Button widget (so we can change colours)
+
+        for label, key in steps:
+            b = tk.Button(btn_frame, text=label,
+                          font=('Courier', 9, 'bold'),
+                          bg=BTN_OFF, fg=DIMTXT, relief='flat',
+                          activebackground=ACCENT, cursor='hand2',
+                          pady=6, anchor='w', padx=8,
+                          # lambda with default arg captures the current value of key
+                          command=lambda k=key: self.switch_step(k))
+            b.pack(fill='x', pady=2, padx=4)
+            # Also bind scroll events on the buttons themselves
+            b.bind('<MouseWheel>', on_scroll)
+            b.bind('<Button-4>',   on_scroll)
+            b.bind('<Button-5>',   on_scroll)
+            self.step_btns[key] = b
+
+        ttk.Separator(sidebar, orient='horizontal').pack(fill='x', pady=6)
+
+        # ── PARAMETER PANEL (scrollable) ─────────────────────
+        # Each step has different sliders/radio-buttons.
+        # We wrap them in a canvas so they can scroll if needed.
+        param_outer = tk.Frame(sidebar, bg=PANEL)
+        param_outer.pack(fill='x', padx=6, pady=(0, 4))
+
+        param_canvas = tk.Canvas(param_outer, bg=PANEL, highlightthickness=0, height=190)
+        param_scroll = ttk.Scrollbar(param_outer, orient='vertical',
+                                     command=param_canvas.yview)
+        param_canvas.configure(yscrollcommand=param_scroll.set)
+        param_scroll.pack(side='right', fill='y')
+        param_canvas.pack(side='left', fill='x', expand=True)
+
+        # self.param_frame is where build_*_params() puts widgets
+        self.param_frame = tk.Frame(param_canvas, bg=PANEL)
+        pw = param_canvas.create_window((0, 0), window=self.param_frame, anchor='nw')
+        param_canvas.bind('<Configure>',
+                          lambda e: param_canvas.itemconfig(pw, width=e.width))
+        self.param_frame.bind('<Configure>',
+                              lambda e: param_canvas.configure(
+                                  scrollregion=param_canvas.bbox('all')))
+
+        ttk.Separator(sidebar, orient='horizontal').pack(fill='x', pady=4)
+
+        # Apply button — calls apply_step() which reads sliders and calls step functions
+        tk.Button(sidebar, text="Apply", command=self.apply_step,
+                  font=('Courier', 12, 'bold'), bg=GREEN, fg='white',
+                  relief='flat', cursor='hand2', pady=7
+                  ).pack(fill='x', padx=10, pady=4)
+
+        # Save Result button — saves result_image to a file
+        tk.Button(sidebar, text="Save Result", command=self.save_result,
+                  font=('Courier', 9), bg='#1e293b', fg=DIMTXT,
+                  relief='flat', cursor='hand2', pady=5
+                  ).pack(fill='x', padx=10, pady=2)
+
+        ttk.Separator(sidebar, orient='horizontal').pack(fill='x', pady=4)
+
+        # ── INFO TEXT BOX ─────────────────────────────────────
+        # Shows the info string returned by the step function.
+        # state='disabled' makes it read-only (user can't type in it).
+        tk.Label(sidebar, text="INFO", font=('Courier', 8, 'bold'),
+                 fg=CYAN, bg=PANEL).pack(anchor='w', padx=10)
+
+        info_frame = tk.Frame(sidebar, bg=PANEL)
+        info_frame.pack(fill='both', expand=True, padx=8, pady=(2, 8))
+
+        info_scroll = ttk.Scrollbar(info_frame)
+        info_scroll.pack(side='right', fill='y')
+
+        self.info_box = tk.Text(info_frame, font=('Courier', 8), fg=PINK, bg='#0d0d18',
+                                relief='flat', wrap='word',
+                                yscrollcommand=info_scroll.set,
+                                state='disabled', bd=0)
+        self.info_box.pack(side='left', fill='both', expand=True)
+        info_scroll.config(command=self.info_box.yview)
+
+        # ── IMAGE DISPLAY AREA ────────────────────────────────
+        # Two side-by-side panels: "ORIGINAL IMAGE" and "RESULT IMAGE".
+        # Each panel holds a tk.Label; we swap the label's image attribute
+        # to display a new picture (see show_image()).
+        display = tk.Frame(main, bg=BG)
+        display.pack(side='left', fill='both', expand=True)
+
+        for col, title in enumerate(["ORIGINAL IMAGE", "RESULT IMAGE"]):
+            f = tk.Frame(display, bg=PANEL,
+                         highlightbackground=ACCENT, highlightthickness=1)
+            f.grid(row=0, column=col, sticky='nsew', padx=6, pady=4)
+            display.columnconfigure(col, weight=1)   # both columns share space equally
+            display.rowconfigure(0, weight=1)
+
+            tk.Label(f, text=title, font=('Courier', 9, 'bold'),
+                     fg=CYAN, bg=PANEL).pack(pady=(8, 4))
+
+            lbl = tk.Label(f, bg=BG, text="No image loaded",
+                           fg='#475569', font=('Courier', 10))
+            lbl.pack(fill='both', expand=True, padx=8, pady=(0, 8))
+
+            if col == 0:
+                self.orig_label   = lbl
+            else:
+                self.result_label = lbl
+
+        # ── STATUS BAR ───────────────────────────────────────
+        # One line at the very bottom — updated by load/apply/save.
+        self.status = tk.StringVar(value="Ready — load an image to begin")
+        tk.Label(self, textvariable=self.status, font=('Courier', 9),
+                 fg='#475569', bg=BG, anchor='w'
+                 ).pack(fill='x', padx=16, pady=(4, 10))
+
+        # Initialise the parameter panel for the default step (Rotate)
+        self.build_rotate_params()
+        self.switch_step("Rotate")
+
+
+    # ──────────────────────────────────────────────────────────
+    #  PARAMETER PANEL HELPERS
+    #
+    #  lbl()    — creates a wrapping label (never gets clipped)
+    #  slider() — creates a horizontal Scale widget that fills the sidebar
+    # ──────────────────────────────────────────────────────────
+
+    def clear_params(self):
+        """Destroy all widgets currently in the parameter panel."""
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+
+    def lbl(self, text):
+        """
+        Add a descriptive label to the parameter panel.
+        wraplength prevents long text from being cut off at the sidebar edge.
+        """
+        tk.Label(self.param_frame, text=text,
+                 font=('Courier', 8), fg=DIMTXT, bg=PANEL,
+                 wraplength=SIDEBAR_W - 40,   # wrap before reaching the edge
+                 justify='left', anchor='w'
+                 ).pack(fill='x', anchor='w', padx=2, pady=(4, 0))
+
+    def slider(self, var, lo, hi, step, start):
+        """
+        Add a horizontal slider to the parameter panel.
+        var   : tk.IntVar or tk.DoubleVar linked to this slider
+        lo/hi : minimum and maximum values
+        step  : smallest increment
+        start : initial value
+        fill='x' makes the slider stretch to fill the sidebar width.
+        """
+        var.set(start)
+        tk.Scale(self.param_frame, variable=var, from_=lo, to=hi,
+                 resolution=step, orient='horizontal',
+                 bg=PANEL, fg='white', troughcolor=BTN_OFF,
+                 highlightthickness=0, activebackground=ACCENT,
+                 sliderlength=16
+                 ).pack(fill='x', padx=2, pady=(0, 4))
+
+
+    # ──────────────────────────────────────────────────────────
+    #  PARAMETER PANEL BUILDERS
+    #
+    #  One method per step.  Each creates the labels and sliders
+    #  needed for that step's parameters.
+    #  Called by switch_step() after clear_params().
+    # ──────────────────────────────────────────────────────────
+
+    def build_rotate_params(self):
+        """Rotation angle slider: -180 to +180 degrees."""
+        self.lbl("Rotation angle (degrees)")
+        self.angle_var = tk.DoubleVar()
+        self.slider(self.angle_var, -180, 180, 1, 45)
+
+    def build_scale_params(self):
+        """Two sliders — one for X scale, one for Y scale (both 20-300)."""
+        self.lbl("Scale X  (100 = no change, 200 = 2x wide)")
+        self.scale_x_var = tk.IntVar()
+        self.slider(self.scale_x_var, 20, 300, 5, 100)
+        self.lbl("Scale Y  (100 = no change, 200 = 2x tall)")
+        self.scale_y_var = tk.IntVar()
+        self.slider(self.scale_y_var, 20, 300, 5, 100)
+
+    def build_flip_params(self):
+        """Radio buttons to choose Horizontal / Vertical / Both."""
+        self.lbl("Flip direction")
+        self.flip_var = tk.StringVar(value="Horizontal")
+        for opt in ["Horizontal", "Vertical", "Both"]:
+            tk.Radiobutton(self.param_frame, text=opt,
+                           variable=self.flip_var, value=opt,
+                           font=('Courier', 9), fg='white', bg=PANEL,
+                           selectcolor=ACCENT, activebackground=PANEL
+                           ).pack(anchor='w')
+
+    def build_lu_params(self):
+        """Patch size slider: 1-100 (mapped to 8-64 pixels in apply_step)."""
+        self.lbl("Patch size  (1-100 maps to 8-64 px)\nSmall = faster  |  Large = more context")
+        self.patch_var = tk.IntVar()
+        self.slider(self.patch_var, 1, 100, 1, 50)
+
+    def build_rank_params(self):
+        """SVD rank slider for Step 3 (rank-nullity demo)."""
+        self.lbl("SVD rank k  (1 = most compressed, 100 = sharpest)")
+        self.rank_var = tk.IntVar()
+        self.slider(self.rank_var, 1, 100, 1, 30)
+
+    def build_basis_params(self):
+        """Number of basis rows to keep in Step 4."""
+        self.lbl("Basis rows to keep  (1-100)\nFewer rows = more compression")
+        self.basis_var = tk.IntVar()
+        self.slider(self.basis_var, 1, 100, 1, 30)
+
+    def build_gs_params(self):
+        """Number of vectors to orthogonalise in Step 5."""
+        self.lbl("Vectors to orthogonalize  (1-100)\nMore = more of image captured")
+        self.gs_var = tk.IntVar()
+        self.slider(self.gs_var, 1, 100, 1, 30)
+
+    def build_proj_params(self):
+        """Subspace dimension k for Step 6."""
+        self.lbl("Subspace dimension k  (1-100)\nLow k = only dominant directions kept")
+        self.proj_var = tk.IntVar()
+        self.slider(self.proj_var, 1, 100, 1, 30)
+
+    def build_ls_params(self):
+        """Polynomial degree for Step 7 (1-20)."""
+        self.lbl("Polynomial degree  (1-20)\nLow = smooth fit  |  High = follows pixels")
+        self.degree_var = tk.IntVar()
+        self.slider(self.degree_var, 1, 20, 1, 5)
+
+    def build_eigen_params(self):
+        """Number of eigenvectors (principal components) for Step 8."""
+        self.lbl("Number of eigenvectors  (1-100)\nMore = more detail retained")
+        self.eigen_var = tk.IntVar()
+        self.slider(self.eigen_var, 1, 100, 1, 30)
+
+    def build_svd_params(self):
+        """SVD rank k for Step 9 (compression demo)."""
+        self.lbl("SVD rank k  (1-100)\nLow = heavy compression  |  High = sharp")
+        self.svd_var = tk.IntVar()
+        self.slider(self.svd_var, 1, 100, 1, 20)
+
+    def build_enhance_params(self):
+        """Enhancement type radio buttons + strength slider for Step 10."""
+        self.lbl("Enhancement type")
+        self.enhance_type_var = tk.StringVar(value="Sharpen")
+        for opt in ["Sharpen", "Smooth", "Contrast"]:
+            tk.Radiobutton(self.param_frame, text=opt,
+                           variable=self.enhance_type_var, value=opt,
+                           font=('Courier', 9), fg='white', bg=PANEL,
+                           selectcolor=ACCENT, activebackground=PANEL
+                           ).pack(anchor='w')
+        self.lbl("Strength  (1-100)")
+        self.enhance_str_var = tk.IntVar()
+        self.slider(self.enhance_str_var, 1, 100, 1, 40)
+
+
+    # ──────────────────────────────────────────────────────────
+    #  switch_step — called when a step button is clicked
+    #
+    #  1. Updates current_step so apply_step() knows what to run.
+    #  2. Changes button colours: selected = purple, others = dark.
+    #  3. Clears the param panel and rebuilds it for the new step.
+    # ──────────────────────────────────────────────────────────
+    def switch_step(self, key):
+        self.current_step.set(key)
+
+        # Update button highlight colours
+        for k, b in self.step_btns.items():
+            b.configure(bg=ACCENT if k == key else BTN_OFF,
+                        fg='white' if k == key else DIMTXT)
+
+        self.clear_params()
+
+        # Dictionary dispatch: maps the step key to its builder method
+        {
+            'Rotate':       self.build_rotate_params,
+            'Scale':        self.build_scale_params,
+            'Flip':         self.build_flip_params,
+            'LU':           self.build_lu_params,
+            'Rank':         self.build_rank_params,
+            'Basis':        self.build_basis_params,
+            'GramSchmidt':  self.build_gs_params,
+            'Projection':   self.build_proj_params,
+            'LeastSquares': self.build_ls_params,
+            'Eigen':        self.build_eigen_params,
+            'SVD':          self.build_svd_params,
+            'Enhance':      self.build_enhance_params,
+        }[key]()
+
+
+    # ──────────────────────────────────────────────────────────
+    #  ACTION METHODS — called by the three main buttons
+    # ──────────────────────────────────────────────────────────
+
+    def load_image(self):
+        """
+        Open a file-picker dialog, load the chosen image, resize it
+        so it fits nicely on screen (max 600x600), and display it
+        in the 'ORIGINAL IMAGE' panel.
+
+        PIL.Image.open() handles PNG, JPEG, BMP, TIFF etc.
+        .convert('RGB') ensures we always have 3 channels
+        (removes alpha channel from PNGs, converts greyscale to RGB).
+        .thumbnail() resizes IN-PLACE keeping aspect ratio.
+        np.array() converts the PIL image to a numpy array for maths.
+        """
+        path = filedialog.askopenfilename(
+            title="Select an image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff"),
+                       ("All files", "*.*")])
+        if not path:
+            return   # user cancelled the dialog
+
+        img = Image.open(path).convert('RGB')
+        img.thumbnail((600, 600), Image.LANCZOS)   # resize keeping aspect ratio
+
+        self.original_image = np.array(img)        # store as numpy array
+        self.show_image(self.orig_label, self.original_image)
+
+        # Reset the result panel
+        self.result_label.configure(image='', text='Click Apply to process')
+        self.result_image = None
+
+        h, w = self.original_image.shape[:2]
+        self.status.set(f"Loaded: {os.path.basename(path)}  ({w} x {h} pixels)")
+        self.set_info(f"Image loaded as matrix A\n"
+                      f"Shape: {h} rows x {w} cols x 3 channels\n\n"
+                      f"Select a pipeline step and click Apply.")
+
+    def apply_step(self):
+        """
+        Read the current step and slider values, call the corresponding
+        step function, and display the result.
+
+        The slider values are raw integers (1-100).  Each step needs
+        them rescaled to meaningful ranges:
+          - Scale X/Y : divide by 100 to get a float factor (e.g. 100 -> 1.0)
+          - Rank/SVD  : multiply by max_rank/100 to get actual rank
+          - Patch     : linear map from [1,100] to [8,64] pixels
+          - Enhance   : divide by 50 to get strength in [0.02, 2.0]
+
+        Wrapped in try/except so any error shows a dialog instead of
+        crashing silently.
+        """
+        if self.original_image is None:
+            messagebox.showwarning("No Image", "Please load an image first.")
+            return
+
+        step = self.current_step.get()
+        try:
+            img = self.original_image
+
+            if step == 'Rotate':
+                result, info = step1_rotate(img, self.angle_var.get())
+
+            elif step == 'Scale':
+                # Convert 1-300 integer -> 0.01-3.0 float factor
+                sx = self.scale_x_var.get() / 100.0
+                sy = self.scale_y_var.get() / 100.0
+                result, info = step1_scale(img, sx, sy)
+
+            elif step == 'Flip':
+                result, info = step1_flip(img, self.flip_var.get())
+
+            elif step == 'LU':
+                # Map slider value 1-100 -> patch pixel size 8-64
+                raw = self.patch_var.get()
+                patch_px = int(8 + (raw - 1) * (64 - 8) / 99)
+                patch_px = max(8, patch_px - (patch_px % 4))   # round to multiple of 4
+                result, info = step2_simplification(img, patch_px)
+
+            elif step == 'Rank':
+                # Scale 1-100 to 1-min(image dimension) actual rank
+                gray = to_gray(img)
+                max_rank = min(gray.shape)
+                k = max(1, int(self.rank_var.get() * max_rank / 100))
+                result, info = step3_rank_nullity(img, k)
+
+            elif step == 'Basis':
+                gray = to_gray(img)
+                max_k = gray.shape[0]         # maximum = number of rows
+                k = max(2, int(self.basis_var.get() * max_k / 100))
+                result, info = step4_basis(img, k)
+
+            elif step == 'GramSchmidt':
+                gray = to_gray(img)
+                max_k = gray.shape[0]
+                k = max(2, int(self.gs_var.get() * max_k / 100))
+                result, info = step5_gram_schmidt(img, k)
+
+            elif step == 'Projection':
+                gray = to_gray(img)
+                max_k = min(gray.shape)
+                k = max(1, int(self.proj_var.get() * max_k / 100))
+                result, info = step6_projection(img, k)
+
+            elif step == 'LeastSquares':
+                # degree slider is already in range 1-20; no rescaling needed
+                result, info = step7_least_squares(img, self.degree_var.get())
+
+            elif step == 'Eigen':
+                gray = to_gray(img)
+                max_k = gray.shape[1]         # maximum = number of columns
+                k = max(1, int(self.eigen_var.get() * max_k / 100))
+                result, info = step8_eigenanalysis(img, k)
+
+            elif step == 'SVD':
+                gray = to_gray(img)
+                max_k = min(gray.shape)
+                k = max(1, int(self.svd_var.get() * max_k / 100))
+                result, info = step9_svd(img, k)
+
+            elif step == 'Enhance':
+                # Map 1-100 -> 0.02-2.0  (divide by 50 since max is 100/50 = 2)
+                strength = self.enhance_str_var.get() / 50.0
+                result, info = step10_enhance(img, self.enhance_type_var.get(), strength)
+
+            # Store and display the result
+            self.result_image = result
+            self.show_image(self.result_label, result)
+            self.set_info(info)
+            self.status.set(f"Applied: {step}  |  Output: {result.shape}")
+
+        except Exception as err:
+            import traceback
+            messagebox.showerror("Error", str(err) + "\n\n" + traceback.format_exc())
+
+    def save_result(self):
+        """
+        Open a file-save dialog and write result_image to disk as PNG or JPEG.
+        PIL.Image.fromarray() converts the numpy array back to a PIL Image.
+        """
+        if self.result_image is None:
+            messagebox.showwarning("No Result", "Apply a step first.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")],
+            initialfile="result.png")
+        if path:
+            Image.fromarray(self.result_image).save(path)
+            self.status.set(f"Saved: {path}")
+
+    def show_image(self, widget, arr):
+        """
+        Convert a numpy array to a tkinter-compatible photo and assign
+        it to `widget` (one of the two image label panels).
+
+        Why store tk_img on the widget?
+        tkinter's garbage collector deletes images not referenced in Python.
+        Storing tk_img as an attribute of the widget keeps it alive.
+        """
+        pil = Image.fromarray(arr.astype(np.uint8))
+        pil.thumbnail((520, 520), Image.LANCZOS)   # fit inside the panel
+        tk_img = ImageTk.PhotoImage(pil)
+        widget.configure(image=tk_img, text='')
+        widget.image = tk_img                       # keep reference alive
+
+    def set_info(self, text):
+        """
+        Replace the content of the info text box with `text`.
+        We briefly enable the box (state='normal') to write,
+        then disable it again so the user can't accidentally edit it.
+        """
+        self.info_box.configure(state='normal')
+        self.info_box.delete('1.0', tk.END)         # clear existing text
+        self.info_box.insert(tk.END, text)
+        self.info_box.configure(state='disabled')
+
+
+# ─────────────────────────────────────────────────────────────
+#  ENTRY POINT
+#
+#  __name__ == '__main__' is True only when you run this file
+#  directly (not when it is imported as a module).
+#  We create the App (window), set its initial size, and hand
+#  control to tkinter's event loop (mainloop), which waits for
+#  button clicks / key presses / mouse events and calls the
+#  appropriate methods.
+# ─────────────────────────────────────────────────────────────
+
+if __name__ == '__main__':
+    app = App()
+    app.geometry('1280x740')   # initial window size in pixels (width x height)
+    app.mainloop()             # start the GUI event loop
