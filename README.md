@@ -1,121 +1,136 @@
-Linear Algebra Image Pipeline
-UE24MA241B — PES University
+# Linear Algebra Image Pipeline
 
-A desktop GUI application that demonstrates key linear algebra concepts through image processing. It applies techniques such as matrix transformations, SVD, eigenanalysis, and projections in an interactive and visual manner.
+An interactive desktop app built with Tkinter that demonstrates core linear algebra concepts through image processing.
 
-Requirements
-Python 3.8 or higher
-Required Python packages:
+The app loads an image, applies one of 10 mathematically grounded transformations, and displays both the original and processed output side by side. Each step also shows an explanation panel with the underlying matrix concept.
+
+## Features
+
+- GUI built with Python Tkinter
+- Image loading, processing, and saving (PNG/JPG)
+- Side-by-side original and result previews
+- 10 pipeline steps linked to linear algebra topics:
+  - Step 1: Matrix Representation (Rotate / Scale / Flip)
+  - Step 2: Matrix Simplification (RREF + LU)
+  - Step 3: Rank and Nullity (SVD-based)
+  - Step 4: Basis Selection (QR with pivoting)
+  - Step 5: Gram-Schmidt Orthogonalization
+  - Step 6: Orthogonal Projection
+  - Step 7: Least Squares Polynomial Fit
+  - Step 8: Eigenanalysis / PCA
+  - Step 9: SVD Compression
+  - Step 10: SVD-based Enhancement
+
+## Project Structure
+
+- `la_mini.py`: Complete application code (math pipeline + GUI)
+- Sample image files (for testing): `pic1.jpg`, `blurry_pic.jpg`
+
+## Requirements
+
+- Python 3.9+
+- Packages:
+  - numpy
+  - scipy
+  - pillow
+
+Install dependencies:
+
+```bash
 pip install numpy scipy pillow
+```
 
-tkinter is included with most Python installations. If it is missing on Linux:
+## How to Run
 
-sudo apt-get install python3-tk
-Running the Application
-python pipeline.py
+From the project folder:
 
-The application opens in a resizable window (default size: 1280 × 740).
+```bash
+python la_mini.py
+```
 
-Usage
-Click Load Image (top-right) and select an image (PNG, JPEG, BMP, or TIFF).
-Choose a pipeline step from the left sidebar.
-Adjust the available controls (sliders or options).
-Click Apply to process the image.
-View the result on the right panel.
-Read the explanation in the info panel.
-Click Save Result to export the processed image.
-Pipeline Overview
-Step	Name	Concept
-1a	Rotate	Rotation matrix, determinant = 1
-1b	Scale	Diagonal matrix, eigenvalues
-1c	Flip	Reflection matrix
-2	RREF + LU	Gaussian elimination, LU decomposition
-3	Rank / Nullity	SVD, rank-nullity theorem
-4	Basis Select	QR decomposition with pivoting
-5	Gram-Schmidt	Orthonormal basis construction
-6	Projection	Orthogonal projection
-7	Least Squares	Polynomial fitting, normal equations
-8	Eigenanalysis	Covariance matrix, PCA
-9	SVD Compress	Rank-k approximation
-10	Enhance	SVD-based image enhancement
-Step Details
-Step 1 — Matrix Transformations
+The app opens a window where you can:
 
-Images are treated as coordinate grids where each pixel position is transformed using a 2×2 matrix.
+1. Click **Load Image**
+2. Choose a pipeline step from the left sidebar
+3. Adjust parameters (sliders/radio options)
+4. Click **Apply**
+5. Optionally click **Save Result**
 
-Rotate: Uses a rotation matrix (area-preserving).
-Scale: Uses a diagonal matrix; determinant reflects area scaling.
-Flip: Uses reflection matrices to mirror the image.
-Step 2 — Matrix Simplification
+## Pipeline Step Summary
 
-Operates on a small central patch of the image.
+### Step 1: Matrix Representation
 
-RREF: Custom Gaussian elimination implementation.
-LU Decomposition: Uses SciPy to factor the matrix and verify reconstruction accuracy.
-Step 3 — Rank and Nullity
+- Rotate using a 2x2 rotation matrix
+- Scale using a diagonal matrix
+- Flip using reflection matrices
 
-Applies SVD to a grayscale image.
+### Step 2: Matrix Simplification
 
-Demonstrates rank-k approximation.
-Verifies the rank-nullity theorem numerically.
-Displays retained image energy.
-Step 4 — Basis Selection
+- Extracts a center patch
+- Computes manual RREF (Gauss-Jordan)
+- Performs LU decomposition and reconstruction check
 
-Uses QR decomposition with column pivoting.
+### Step 3: Rank and Nullity
 
-Identifies linearly independent rows.
-Reconstructs remaining rows using linear combinations.
-Step 5 — Gram-Schmidt
+- Uses SVD singular values
+- Demonstrates rank-nullity relation
+- Reconstructs image using rank-k approximation
 
-Constructs an orthonormal basis from selected vectors.
+### Step 4: Basis Selection
 
-Validates orthogonality numerically.
-Projects the image onto the computed subspace.
-Step 6 — Projection
+- Uses QR decomposition with pivoting to select independent rows
+- Reconstructs rows from selected basis vectors
 
-Builds a projection matrix using SVD components.
+### Step 5: Gram-Schmidt
 
-Ensures symmetry and idempotence properties.
-Step 7 — Least Squares
+- Orthogonalizes selected row vectors
+- Projects image onto orthonormal basis
 
-Fits polynomial curves to image columns.
+### Step 6: Projection
 
-Uses Vandermonde matrices.
-Solves using normal equations.
-Reports fitting error (RMSE).
-Step 8 — Eigenanalysis (PCA)
+- Builds projection matrix P = Uk * Uk^T from top singular vectors
+- Projects image onto dominant subspace
 
-Performs Principal Component Analysis.
+### Step 7: Least Squares
 
-Computes covariance matrix.
-Extracts principal components.
-Displays explained variance.
-Step 9 — SVD Compression
+- Fits polynomial models column-wise using normal equations
+- Reports RMSE of fit
 
-Performs image compression using truncated SVD.
+### Step 8: Eigenanalysis / PCA
 
-Reduces storage requirements.
-Displays compression ratio and retained energy.
-Processes RGB channels independently.
-Step 10 — Enhancement
+- Builds covariance matrix
+- Uses eigenvectors with largest eigenvalues
+- Reconstructs image from top principal components
 
-Modifies singular values to adjust image characteristics.
+### Step 9: SVD Compression
 
-Sharpen: Enhances dominant features.
-Smooth: Reduces noise and texture.
-Contrast: Scales overall intensity.
-Code Structure
-pipeline.py
-├── Helper functions        (image conversion and transformations)
-├── Step functions          (step1 → step10)
-└── App class (tkinter GUI)
-    ├── UI construction
-    ├── Parameter controls
-    ├── Image loading and display
-    ├── Processing logic
-    └── Save functionality
-Notes
-Images are resized to fit within 600 × 600 pixels while preserving aspect ratio.
-Computationally intensive steps may take longer for large images.
-The RREF step operates on a limited patch to maintain performance.
-Color consistency is preserved by adjusting RGB channels based on grayscale transformations.
+- Keeps top-k singular values
+- Reports retained energy and compression ratio
+
+### Step 10: Enhancement
+
+SVD-domain filters:
+
+- **Sharpen**: boost dominant singular values
+- **Smooth**: suppress low singular values
+- **Contrast**: scale all singular values
+
+## Notes
+
+- The app processes grayscale for many matrix operations and restores color where needed.
+- For large images, computations can be slower in steps involving decomposition.
+- If a step fails due to numerical issues, the app uses safe fallbacks (for example, pseudo-inverse in some cases).
+
+## Troubleshooting
+
+- If import errors occur, re-check installed packages:
+
+```bash
+pip install --upgrade numpy scipy pillow
+```
+
+- If Tkinter is missing (uncommon on standard Python installs), install a Python distribution that includes Tk support.
+
+## Author / Context
+
+This project is structured as an educational mini project for demonstrating linear algebra concepts through practical image transformations.
