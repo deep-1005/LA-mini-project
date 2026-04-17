@@ -44,30 +44,29 @@ python la_mini.py
 
 The app opens a window where you can:
 
-1. Click **Load Image**
 2. Choose a pipeline step from the left sidebar
-3. Adjust parameters (sliders/radio options)
-4. Click **Apply**
-5. Optionally click **Save Result**
 
 ## Pipeline Step Summary
 
+<<<<<<< HEAD
 ### Rotation, Scaling, Reflection
+### Step 1: Matrix Representation
+>>>>>>> 1b1451455340fcdd6d07a9d1b5b29c434e974841
 
 - Rotate using a 2x2 rotation matrix
 - Scale using a diagonal matrix
-- Flip using reflection matrices
 
-### SVD Compression
+SVD-domain filters:
 
-- Uses SVD singular values
-- Reconstructs image using rank-k approximation
-- Reports retained energy and approximate storage savings
-
+- **Sharpen**: boost dominant singular values
+- **Contrast**: scale all singular values
 ## Notes
 
 - The app processes grayscale for many matrix operations and restores color where needed.
+<<<<<<< HEAD
 - The full image is kept in memory for processing; previews are scaled only for display.
+=======
+>>>>>>> 1b1451455340fcdd6d07a9d1b5b29c434e974841
 - For large images, computations can be slower in steps involving decomposition.
 - If a step fails due to numerical issues, the app uses safe fallbacks (for example, pseudo-inverse in some cases).
 
