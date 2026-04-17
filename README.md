@@ -1,85 +1,130 @@
 # Linear Algebra Image Tools
 
-An interactive desktop app built with Tkinter that demonstrates core linear algebra concepts through image processing.
+A Tkinter desktop application that demonstrates core linear algebra ideas through interactive image transformations.
 
-The app loads an image, applies one of 4 mathematically grounded transformations, and displays both the original and processed output side by side. Each step also shows an explanation panel with the underlying matrix concept.
+## Overview
+
+This project lets you load an image, apply mathematically meaningful operations, and compare the original and transformed outputs side by side.
+
+It also displays a small math dashboard that explains the active transformation using matrix forms, determinants, eigenvalues, and SVD details.
 
 ## Features
 
-- GUI built with Python Tkinter
-- Image loading, processing, and saving (PNG/JPG)
-- Side-by-side original and result previews
-- 4 transformation modes linked to linear algebra topics:
+- Load images (`.png`, `.jpg`, `.jpeg`)
+- Save transformed output (`.png`, `.jpg`)
+- Side-by-side preview panels
+- Clean, minimalist Tkinter UI
+- Four operations:
   - Rotation
-  - Scaling / Zoom
-  - Reflection
-  - SVD Compression
+  - Scaling (zoom in/out)
+  - Reflection (horizontal, vertical, both)
+  - SVD compression (rank-k approximation)
+
+## Tech Stack
+
+- Python 3.9+
+- NumPy
+- SciPy
+- Pillow
+- Tkinter (usually included with standard Python installs)
 
 ## Project Structure
 
-- `la_mini.py`: Complete application code (math transformations + GUI)
-- Sample image files for testing: `pic1.jpg`, `blurry_pic.jpg`
+- `la_mini.py` - Main application file (GUI + all transformation logic)
+- `README.md` - Project documentation
 
-## Requirements
+## Installation
 
-- Python 3.9+
-- Packages:
-  - numpy
-  - scipy
-  - pillow
-
-Install dependencies:
+1. Open a terminal in the project folder.
+2. Install dependencies:
 
 ```bash
 pip install numpy scipy pillow
 ```
 
-## How to Run
-
-From the project folder:
+## Run
 
 ```bash
 python la_mini.py
 ```
 
-The app opens a window where you can:
+## How To Use
 
-2. Choose a pipeline step from the left sidebar
+1. Click **Load Image**.
+2. Choose one operation from the left panel:
+   - Rotation
+   - Scaling (Zoom)
+   - Reflection
+   - SVD Compression
+3. Adjust parameters.
+4. Click **Apply Transformation**.
+5. Click **Save Output** to export the result.
 
-## Pipeline Step Summary
+## Math Behind Each Operation
 
-<<<<<<< HEAD
-### Rotation, Scaling, Reflection
-### Step 1: Matrix Representation
->>>>>>> 1b1451455340fcdd6d07a9d1b5b29c434e974841
+### Rotation
 
-- Rotate using a 2x2 rotation matrix
-- Scale using a diagonal matrix
+Uses the 2D rotation matrix:
 
-SVD-domain filters:
+$$
+R = \begin{bmatrix}
+\cos\theta & -\sin\theta \\
+\sin\theta & \cos\theta
+\end{bmatrix}
+$$
 
-- **Sharpen**: boost dominant singular values
-- **Contrast**: scale all singular values
+### Scaling
+
+Uses the diagonal scaling matrix:
+
+$$
+S = \begin{bmatrix}
+s_x & 0 \\
+0 & s_y
+\end{bmatrix}
+$$
+
+### Reflection
+
+Uses reflection matrices such as:
+
+$$
+\begin{bmatrix}
+-1 & 0 \\
+0 & 1
+\end{bmatrix},
+\begin{bmatrix}
+1 & 0 \\
+0 & -1
+\end{bmatrix}
+$$
+
+### SVD Compression
+
+Approximates the image matrix using rank-k reconstruction:
+
+$$
+A \approx U_k \Sigma_k V_k^T
+$$
+
+Keeping fewer singular values reduces storage while preserving most visual energy.
+
 ## Notes
 
-- The app processes grayscale for many matrix operations and restores color where needed.
-<<<<<<< HEAD
-- The full image is kept in memory for processing; previews are scaled only for display.
-=======
->>>>>>> 1b1451455340fcdd6d07a9d1b5b29c434e974841
-- For large images, computations can be slower in steps involving decomposition.
-- If a step fails due to numerical issues, the app uses safe fallbacks (for example, pseudo-inverse in some cases).
+- Transformations are applied around image center using affine mapping.
+- For color images, grayscale space is used for SVD and then recolored.
+- Very large images may take longer for SVD compression.
 
 ## Troubleshooting
 
-- If import errors occur, re-check installed packages:
+- If dependencies are missing:
 
 ```bash
 pip install --upgrade numpy scipy pillow
 ```
 
-- If Tkinter is missing (uncommon on standard Python installs), install a Python distribution that includes Tk support.
+- If Tkinter is unavailable, install a Python distribution that includes Tk support.
 
-## Author / Context
+## Context
 
-This project is structured as an educational mini project for demonstrating linear algebra concepts through practical image transformations.
+Educational mini project for learning and demonstrating linear algebra through image processing.
